@@ -1,15 +1,18 @@
-"""Unit tests for the pure logic in watcher.py: parsers, alert engine, state.
+"""Unit tests for the pure logic in watcher.py and discover.py: parsers,
+alert engine, config loading, event matching, state.
 
 Network, notifications, and process supervision are exercised on show day;
 everything decision-making is tested here.
 """
 
 import json
+from datetime import datetime
 
 import pytest
 
+import discover
 import watcher
-from watcher import Engine, Quote, Source
+from watcher import Config, Engine, Quote, Source
 
 
 @pytest.fixture(autouse=True)
@@ -19,9 +22,21 @@ def sandbox_files(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "STATE_FILE", tmp_path / "state.json")
 
 
+CFG = Config(
+    event="Test Event",
+    stop_at=datetime(2026, 9, 9, 20, 30),
+    min_seats=2,
+    zone_tiers={
+        "Lower": {"good": 200.0, "screaming": 150.0},
+        "Floor": {"good": 270.0, "screaming": 200.0},
+    },
+    sources={"vivid": {"production_id": 1, "buy_url": "https://example.com"}},
+)
+
+
 @pytest.fixture()
 def engine():
-    return Engine(state={})
+    return Engine(CFG, state={})
 
 
 @pytest.fixture()
@@ -179,27 +194,29 @@ class TestVividParser:
     }
 
     def test_filters_singles_and_keeps_zone_minimums(self):
-        zones = watcher.parse_vivid_zones(self.PAYLOAD)
+        zones = watcher.parse_vivid_zones(self.PAYLOAD, min_seats=2)
         assert zones["Floor"] == Quote(287.0, "Floor 2", 2)
         assert zones["Upper"].price == 113.0
         assert "Pit General Admission" not in zones
 
     def test_empty_payload_raises(self):
         with pytest.raises(ValueError):
-            watcher.parse_vivid_zones({"tickets": []})
+            watcher.parse_vivid_zones({"tickets": []}, min_seats=2)
 
     @pytest.mark.parametrize(
         "section, zone",
         [
             ("GA Pit", "Pit General Admission"),
             ("Floor 3", "Floor"),
+            ("GAFL", "Floor"),
+            ("GA Floor", "Floor"),
             ("Lower Level 109", "Lower"),
             ("Upper Level 222", "Upper"),
             ("Suite 12", "Other"),
         ],
     )
     def test_section_to_zone_mapping(self, section, zone):
-        assert watcher._vivid_zone(section) == zone
+        assert watcher.zone_from_section(section) == zone
 
 
 # ----------------------------------------------------------- state & labels
@@ -219,3 +236,104 @@ def test_zone_labels():
     assert watcher.zone_label("Lower") == "100s"
     assert watcher.zone_label("Pit General Admission") == "Pit GA"
     assert watcher.zone_label("Floor") == "Floor"
+
+
+# ------------------------------------------------------------ Gametime parser
+
+
+class TestGametimeParser:
+    PAYLOAD = {
+        "listings": [
+            {"price": {"total": 16400}, "section": "102", "section_group": "Lower"},
+            {"price": {"total": 15100}, "section": "117", "section_group": "Lower"},
+            {"price": {"total": 21500}, "section": "FLR4", "section_group": "Floor"},
+            {"section": "no price"},
+        ]
+    }
+
+    def test_groups_by_section_group_in_dollars(self):
+        zones = watcher.parse_gametime_zones(self.PAYLOAD)
+        assert zones["Lower"] == Quote(151.0, "117", 2)
+        assert zones["Floor"].price == 215.0
+
+    def test_empty_payload_raises(self):
+        with pytest.raises(ValueError):
+            watcher.parse_gametime_zones({"listings": []})
+
+
+# ------------------------------------------------------------- config loading
+
+
+class TestConfig:
+    RAW = {
+        "event": "Test",
+        "stop_at": "2026-09-09T20:30:00",
+        "zones": {"Lower": {"good": 200, "screaming": 150}},
+        "sources": {"vivid": {"production_id": 1, "buy_url": "u"}},
+    }
+
+    def write(self, tmp_path, raw):
+        p = tmp_path / "config.json"
+        p.write_text(json.dumps(raw))
+        return p
+
+    def test_loads_and_defaults_min_seats(self, tmp_path):
+        cfg = watcher.load_config(self.write(tmp_path, self.RAW))
+        assert cfg.min_seats == 2
+        assert cfg.zone_tiers["Lower"]["screaming"] == 150.0
+        assert cfg.stop_at == datetime(2026, 9, 9, 20, 30)
+
+    def test_missing_key_is_a_clear_error(self, tmp_path):
+        raw = {k: v for k, v in self.RAW.items() if k != "zones"}
+        with pytest.raises(SystemExit, match="zones"):
+            watcher.load_config(self.write(tmp_path, raw))
+
+    def test_missing_file_points_at_discover(self, tmp_path):
+        with pytest.raises(SystemExit, match="discover"):
+            watcher.load_config(tmp_path / "nope.json")
+
+    def test_sources_gate_what_gets_built(self, tmp_path):
+        cfg = watcher.load_config(self.write(tmp_path, self.RAW))
+        section, context = watcher.build_sources(cfg)
+        assert [s.name for s in section] == ["Vivid"]
+        assert context == []
+
+
+# ----------------------------------------------------- cross-site matching
+
+
+class TestEventMatching:
+    ANCHOR = discover.Hit(
+        "gametime", "Weezer", "Chase Center, San Francisco",
+        datetime(2026, 9, 9, 19, 0), 38.0,
+    )
+
+    def test_same_show_different_billing_matches(self):
+        hit = discover.Hit(
+            "tickpick", "Weezer, The Shins & Silversun Pickups",
+            "Chase Center, San Francisco", datetime(2026, 9, 9, 19, 0), 37.0,
+        )
+        assert discover.looks_like(self.ANCHOR, hit)
+
+    def test_same_tour_next_night_does_not_match(self):
+        hit = discover.Hit(
+            "stubhub", "Weezer Sacramento", "Golden 1 Center",
+            datetime(2026, 9, 8, 19, 0), None,
+        )
+        assert not discover.looks_like(self.ANCHOR, hit)
+
+    def test_different_artist_same_venue_does_not_match(self):
+        hit = discover.Hit(
+            "vivid", "Daniel Caesar", "Chase Center, San Francisco",
+            datetime(2026, 9, 9, 20, 0), None,
+        )
+        assert not discover.looks_like(self.ANCHOR, hit)
+
+    def test_missing_date_falls_back_to_name_and_venue(self):
+        hit = discover.Hit(
+            "tickpick", "Weezer", "Chase Center, San Francisco", None, None,
+        )
+        assert discover.looks_like(self.ANCHOR, hit)
+
+    def test_json_escapes_decoded(self):
+        assert discover._junescape("Shins \\u0026 Pickups") == "Shins & Pickups"

@@ -10,7 +10,8 @@ several times that earlier in the day.
 
 ## What it does
 
-Every ~15 seconds it checks StubHub and Vivid Seats for the cheapest
+Point it at a concert (there's a built-in search — see below) and every
+~15 seconds it checks Gametime, Vivid Seats, and StubHub for the cheapest
 listing in each zone you care about (floor, lower bowl, ...), for two or more
 seats together. When a price crosses one of your thresholds, it tells you
 immediately — everywhere:
@@ -38,12 +39,16 @@ selling out and a pricier one rotating in doesn't count.
 
 ## How it's built
 
-One file, `watcher.py`, three layers:
+One watcher (`watcher.py`), three layers:
 
 - **sources** — scrapers that return the cheapest quote per zone. Plain
   HTTPS with browser impersonation (`curl_cffi`), parsing the price data
-  embedded in event pages and public listing APIs. The parsing is pure
-  functions, so it's all unit-testable without network.
+  embedded in event pages and public listing APIs. Gametime and Vivid quotes
+  are pair-verified (only listings with your seat count together); StubHub
+  section stats can't verify quantity, so alerts flag that. TickPick and
+  SeatGeek are bot-shielded at the section level, so they contribute
+  event-level minimums as context. The parsing is pure functions, so it's
+  all unit-testable without network.
 - **engine** — decides when a quote deserves an alert: tier thresholds,
   re-alert cooldowns, session-low tracking. State survives restarts via
   atomic writes to `state.json`.
@@ -77,10 +82,34 @@ python3 -m venv .venv
 brew install terminal-notifier     # optional, for clickable Mac notifications
 ```
 
-Then open `watcher.py` and point the config block at the top at your event:
-the marketplace URLs and IDs, your `ZONE_TIERS` price thresholds, how many
-seats you need together (`MIN_SEATS`), and when to stop (`SHOW_END_ISO`).
-It ships configured for the show it was built for, as an example.
+## Pick a concert
+
+```bash
+.venv/bin/python discover.py "weezer san francisco"
+```
+
+This searches all five marketplaces, shows you the upcoming shows that
+match, and — once you pick one — finds the same concert on the other sites
+(matching by date and venue), pulls the live per-zone minimums so you can
+set thresholds with real numbers in front of you, and writes `config.json`:
+
+```
+Upcoming shows (via gametime):
+   1. Wed Sep 9 2026 7:00 PM  Weezer — Chase Center, San Francisco  from $38
+
+Watch which one? 1
+  matched on vivid     Weezer — Chase Center, San Francisco
+  matched on tickpick  Weezer, The Shins & Silversun Pickups — Chase Center, San Francisco
+  ...
+Current zone minimums (all-in, cheapest across sites):
+  Upper   $37
+  100s    $131
+  Floor   $215
+```
+
+`config.json` is plain JSON and safe to hand-edit (see
+`config.example.json`) — one config per event; run a second watcher with
+`--config` to track two shows at once.
 
 ## Run
 
@@ -108,8 +137,9 @@ treat it like a password.
 
 ## Tests
 
-The decision-making — parsers, alert tiers, cooldowns, momentum logic, state
-persistence — is covered by unit tests. No network required.
+The decision-making — parsers, alert tiers, cooldowns, momentum logic,
+config loading, cross-site event matching, state persistence — is covered
+by unit tests. No network required.
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
