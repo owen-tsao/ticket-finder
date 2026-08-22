@@ -1,0 +1,31 @@
+{
+  "event": "Weezer @ Chase Center (Wed Sep 9, 7:00 PM)",
+  "stop_at": "2026-09-09T20:30:00",
+  "min_seats": 2,
+  "zones": {
+    "Floor": { "good": 200, "screaming": 150 },
+    "Pit General Admission": { "good": 200, "screaming": 150 },
+    "Lower": { "good": 120, "screaming": 90 }
+  },
+  "sources": {
+    "gametime": {
+      "event_id": "69c56dd5b321e1c9701e75a2",
+      "buy_url": "https://gametime.co/concert/weezer-tickets/9-9-2026-san-francisco-ca-chase-center/events/69c56dd5b321e1c9701e75a2"
+    },
+    "vivid": {
+      "production_id": 6834031,
+      "buy_url": "https://www.vividseats.com/weezer-tickets-san-francisco-chase-center-9-9-2026/production/6834031"
+    },
+    "stubhub": {
+      "url": "https://www.stubhub.ie/weezer-san-francisco-tickets-9-9-2026/event/107154119/"
+    },
+    "tickpick": {
+      "event_id": "7833715",
+      "url": "https://www.tickpick.com/buy-weezer-the-shins-silversun-pickups-tickets-chase-center-9-9-26-7pm/7833715/"
+    },
+    "seatgeek": {
+      "event_id": "18147491",
+      "url": "https://seatgeek.com/weezer-tickets/san-francisco-california-chase-center-2026-09-09-7-pm/concert/18147491"
+    }
+  }
+}

@@ -5,6 +5,7 @@ __pycache__/
 
 # runtime artifacts
 state.json
+config.json
 *.log
 .heartbeat
 .watcher.lock

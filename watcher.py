@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """Last-minute ticket price-drop watcher.
 
-Polls resale marketplaces for a single event and sends tiered alerts when
-prices in watched zones cross your thresholds. Built for personal use in the
-final hours before a show, when prices move fast; polls politely (randomized
-~15s cadence, one lightweight request per source) and never automates
-purchases — alerts deep-link to the marketplace's own buy page.
+Polls resale marketplaces for one event (defined in config.json — run
+discover.py to search for a concert and generate one) and sends tiered
+alerts when prices in watched zones cross your thresholds. Built for the
+final hours before a show, when prices move fast; polls politely
+(randomized ~15s cadence, one lightweight request per source) and never
+automates purchases — alerts deep-link to the marketplace's own buy page.
 
-Architecture (single file, three layers):
-  sources   — scrapers returning {zone: Quote} (StubHub, Vivid) plus
-              event-level context minimums (TickPick, SeatGeek)
+Architecture (three layers):
+  sources   — scrapers returning {zone: Quote} (StubHub, Vivid, Gametime)
+              plus event-level context minimums (TickPick, SeatGeek)
   engine    — tiered alert rules with cooldowns + session-low tracking
   notifier  — macOS (terminal-notifier, clickable) + ntfy.sh phone push
 
-Alert tiers (all-in prices, MIN_SEATS+ seats together):
+Alert tiers (all-in prices, min_seats+ together):
   GOOD   🔥  price at/below the zone's "good" threshold
   SCREAM 🚨  price at/below the zone's "screaming" threshold (auto-opens buy page)
   DROP   📉  watched zone hits a new session low >= DROP_ALERT_PCT below last poll
 
-The config block below is set up for an example event (Daniel Caesar @ Chase
-Center, Aug 2026); point the URLs/IDs and ZONE_TIERS at your own event.
-
 Usage:
-    .venv/bin/python watcher.py            # foreground loop
-    .venv/bin/python watcher.py --once     # single quiet check
+    python discover.py "weezer san francisco"   # pick a concert, write config.json
+    .venv/bin/python watcher.py                 # watch it (--once for a single check)
     # production: run under launchd (see ticket-watcher.plist.example)
 """
 
@@ -45,14 +43,11 @@ from typing import Callable
 
 from curl_cffi import requests
 
-# ================================================================= config
+# ==================================================== behavior (event-agnostic)
 
-EVENT_NAME = "Daniel Caesar @ Chase Center (Fri Aug 21, 7:30 PM)"
-MIN_SEATS = 2                 # only alert on listings buyable as N+ together
 POLL_SECONDS = 15
 POLL_JITTER_S = 4             # randomized cadence; regular polling is a bot tell
 CONTEXT_EVERY = 4             # TickPick/SeatGeek context every N cycles
-SHOW_END_ISO = "2026-08-21T21:00:00"
 SOURCE_FAIL_NOTIFY = 6        # consecutive failures before "source down" ping
 DROP_ALERT_PCT = 5.0
 REALERT_COOLDOWN_S = 900      # repeat a tier alert only after 15 min…
@@ -60,39 +55,48 @@ REALERT_DELTA = 5.0           # …or a further $5 drop
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")   # empty = phone push disabled;
                                                 # use a long random topic name
 SHOW_DIALOGS = False          # popup dialog windows for good/screaming/system
-
-# zone -> tier thresholds ($ all-in). Pit GA counts as floor.
-ZONE_TIERS = {
-    "Floor": {"good": 270.0, "screaming": 200.0},
-    "Pit General Admission": {"good": 270.0, "screaming": 200.0},
-    "Lower": {"good": 200.0, "screaming": 150.0},   # 100-level sections
-}
 ZONE_LABELS = {"Lower": "100s", "Pit General Admission": "Pit GA"}
 
-TICKPICK_EVENT_ID = "7855144"
-TICKPICK_URL = (
-    "https://www.tickpick.com/buy-daniel-caesar-tickets-"
-    f"chase-center-8-21-26-7pm/{TICKPICK_EVENT_ID}/"
-)
-SEATGEEK_ARTIST_URL = "https://seatgeek.com/daniel-caesar-tickets"
-SEATGEEK_EVENT_ID = "18162225"
-STUBHUB_URL = (
-    "https://www.stubhub.ie/daniel-caesar-san-francisco-tickets-"
-    "8-21-2026/event/107202109/"
-)
-# Scrape the .ie storefront (bot-tolerant, all-in prices); buy on .com (the
-# US catalog uses a different event id — 160818773 — and deep-links to the
-# StubHub app on mobile). .com list view shows pre-fee prices; alerts include
-# the pre-fee estimate so the numbers are findable.
-STUBHUB_BUY_URL = (
-    "https://www.stubhub.com/daniel-caesar-san-francisco-tickets-"
-    "8-21-2026/event/160818773/?quantity=2"
-)
-VIVID_API_URL = "https://www.vividseats.com/hermes/api/v1/listings?productionId=6867163"
-VIVID_BUY_URL = (
-    "https://www.vividseats.com/daniel-caesar-tickets-san-francisco-"
-    "chase-center-8-21-2026/production/6867163"
-)
+VIVID_LISTINGS_API = "https://www.vividseats.com/hermes/api/v1/listings?productionId={}"
+GAMETIME_LISTINGS_API = "https://mobile.gametime.co/v1/listings?event_id={}&quantity={}"
+
+
+# ======================================================== event config (json)
+
+@dataclass(frozen=True)
+class Config:
+    """One event to watch. Generated by discover.py; safe to hand-edit."""
+    event: str
+    stop_at: datetime                          # watcher exits cleanly here
+    min_seats: int                             # only alert on N+ together
+    zone_tiers: dict[str, dict[str, float]]    # zone -> {good, screaming} $
+    sources: dict[str, dict]                   # per-marketplace ids/urls
+
+
+def load_config(path: Path) -> Config:
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise SystemExit(
+            f"No config at {path} — run discover.py to pick a concert, "
+            f"or copy config.example.json"
+        )
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{path} is not valid JSON: {e}")
+    missing = {"event", "stop_at", "zones", "sources"} - raw.keys()
+    if missing:
+        raise SystemExit(f"{path} missing keys: {', '.join(sorted(missing))}")
+    return Config(
+        event=raw["event"],
+        stop_at=datetime.fromisoformat(raw["stop_at"]),
+        min_seats=int(raw.get("min_seats", 2)),
+        zone_tiers={
+            zone: {"good": float(t["good"]), "screaming": float(t["screaming"])}
+            for zone, t in raw["zones"].items()
+        },
+        sources=raw["sources"],
+    )
+
 
 HERE = Path(__file__).parent
 STATE_FILE = HERE / "state.json"
@@ -176,15 +180,16 @@ def parse_stubhub_zones(text: str) -> dict[str, Quote]:
     return zones
 
 
-def fetch_stubhub_zones() -> dict[str, Quote]:
-    return parse_stubhub_zones(_get(STUBHUB_URL).text)
+def fetch_stubhub_zones(url: str) -> dict[str, Quote]:
+    return parse_stubhub_zones(_get(url).text)
 
 
-def _vivid_zone(section_name: str) -> str:
+def zone_from_section(section_name: str) -> str:
+    """Normalize a marketplace section/group name to a zone key."""
     s = section_name.lower()
     if "pit" in s:
         return "Pit General Admission"
-    if s.startswith("floor"):
+    if s.startswith("floor") or s.startswith("gafl") or "ga floor" in s:
         return "Floor"
     if "lower" in s:
         return "Lower"
@@ -193,18 +198,18 @@ def _vivid_zone(section_name: str) -> str:
     return "Other"
 
 
-def parse_vivid_zones(payload: dict) -> dict[str, Quote]:
+def parse_vivid_zones(payload: dict, min_seats: int) -> dict[str, Quote]:
     """Per-zone minimums from the hermes listings API ('aip' = all-in price).
-    Only listings with quantity >= MIN_SEATS are considered."""
+    Only listings with quantity >= min_seats are considered."""
     zones: dict[str, Quote] = {}
     for t in payload.get("tickets", []):
         try:
             price, qty = float(t["aip"]), int(t.get("q", "0"))
         except (KeyError, ValueError):
             continue
-        if qty < MIN_SEATS:
+        if qty < min_seats:
             continue
-        zone = _vivid_zone(t.get("s", ""))
+        zone = zone_from_section(t.get("s", ""))
         q = zones.get(zone)
         if q is None:
             zones[zone] = Quote(price, t["s"], 1)
@@ -217,38 +222,104 @@ def parse_vivid_zones(payload: dict) -> dict[str, Quote]:
     return zones
 
 
-def fetch_vivid_zones() -> dict[str, Quote]:
-    return parse_vivid_zones(_get(VIVID_API_URL).json())
+def parse_gametime_zones(payload: dict) -> dict[str, Quote]:
+    """Per-zone minimums from Gametime's listings API. Prices arrive in cents,
+    all-in; the API itself filters by requested quantity, so listings here
+    are pair-verified."""
+    zones: dict[str, Quote] = {}
+    for t in payload.get("listings", []):
+        try:
+            price = t["price"]["total"] / 100
+            section = t["section"]
+        except (KeyError, TypeError):
+            continue
+        zone = zone_from_section(t.get("section_group") or section)
+        q = zones.get(zone)
+        if q is None:
+            zones[zone] = Quote(price, section, 1)
+        else:
+            q.listings += 1
+            if price < q.price:
+                q.price, q.section = price, section
+    if not zones:
+        raise ValueError("no listings parsed from Gametime API")
+    return zones
 
 
-def fetch_tickpick_min() -> float:
+def fetch_vivid_zones(production_id, min_seats: int) -> dict[str, Quote]:
+    return parse_vivid_zones(
+        _get(VIVID_LISTINGS_API.format(production_id)).json(), min_seats
+    )
+
+
+def fetch_gametime_zones(event_id: str, min_seats: int) -> dict[str, Quote]:
+    return parse_gametime_zones(
+        _get(GAMETIME_LISTINGS_API.format(event_id, min_seats)).json()
+    )
+
+
+def fetch_tickpick_min(url: str, event_id: str) -> float:
     m = re.search(
-        r'stats\\?":\{\\?"event_id\\?":\\?"' + re.escape(TICKPICK_EVENT_ID)
+        r'stats\\?":\{\\?"event_id\\?":\\?"' + re.escape(str(event_id))
         + r'\\?",\\?"count\\?":(\d+),'
         r'\\?"max\\?":([\d.]+),\\?"min\\?":([\d.]+)',
-        _get(TICKPICK_URL).text,
+        _get(url).text,
     )
     if not m:
         raise ValueError("stats not found in TickPick page")
     return float(m.group(3))
 
 
-def fetch_seatgeek_min() -> float:
-    text = _get(SEATGEEK_ARTIST_URL).text
-    idx = text.find(f"/concert/{SEATGEEK_EVENT_ID}")
-    if idx == -1:
-        raise ValueError("event not found on SeatGeek artist page")
-    m = re.search(r'"lowest_price":([\d.]+)', text[idx: idx + 3000])
-    if not m:
-        raise ValueError("lowest_price not found for SeatGeek event")
-    return float(m.group(1))
+def fetch_seatgeek_min(url: str, event_id: str) -> float:
+    text = _get(url).text
+    # the event id appears many times (canonical links, og tags) with no data
+    # nearby; find the occurrence that actually has stats after it
+    for m in re.finditer(re.escape(f"/concert/{event_id}"), text):
+        stats = re.search(r'"lowest_price":([\d.]+)', text[m.end(): m.end() + 3000])
+        if stats:
+            return float(stats.group(1))
+    raise ValueError("lowest_price not found for SeatGeek event")
 
 
-SECTION_SOURCES = [
-    Source("Vivid", fetch_vivid_zones, VIVID_BUY_URL, pair_verified=True),
-    Source("StubHub", fetch_stubhub_zones, STUBHUB_BUY_URL, pair_verified=False),
-]
-CONTEXT_SOURCES = [("TickPick", fetch_tickpick_min), ("SeatGeek", fetch_seatgeek_min)]
+def build_sources(cfg: Config) -> tuple[list[Source], list[tuple[str, Callable[[], float]]]]:
+    """Instantiate only the sources present in the config. Section sources
+    drive zone alerts; context sources are event-level minimums for logging."""
+    s = cfg.sources
+    section: list[Source] = []
+    context: list[tuple[str, Callable[[], float]]] = []
+    if "gametime" in s:
+        section.append(Source(
+            "Gametime",
+            lambda c=s["gametime"]: fetch_gametime_zones(c["event_id"], cfg.min_seats),
+            s["gametime"]["buy_url"], pair_verified=True,
+        ))
+    if "vivid" in s:
+        section.append(Source(
+            "Vivid",
+            lambda c=s["vivid"]: fetch_vivid_zones(c["production_id"], cfg.min_seats),
+            s["vivid"]["buy_url"], pair_verified=True,
+        ))
+    if "stubhub" in s:
+        # scrape the bot-tolerant .ie storefront; prices there are all-in
+        section.append(Source(
+            "StubHub",
+            lambda c=s["stubhub"]: fetch_stubhub_zones(c["url"]),
+            s["stubhub"].get("buy_url") or s["stubhub"]["url"],
+            pair_verified=False,
+        ))
+    if "tickpick" in s:
+        context.append((
+            "TickPick",
+            lambda c=s["tickpick"]: fetch_tickpick_min(c["url"], c["event_id"]),
+        ))
+    if "seatgeek" in s:
+        context.append((
+            "SeatGeek",
+            lambda c=s["seatgeek"]: fetch_seatgeek_min(c["url"], c["event_id"]),
+        ))
+    if not section:
+        raise SystemExit("config has no section sources (gametime/vivid/stubhub)")
+    return section, context
 
 
 # ================================================================ notifier
@@ -405,9 +476,13 @@ def save_state(state: dict) -> None:
 class Engine:
     """Evaluates quotes against tier/momentum rules and fires notifications."""
 
-    def __init__(self, state: dict):
+    def __init__(self, cfg: Config, state: dict):
+        self.cfg = cfg
         self.state = state
         self.fail_counts: dict[str, int] = {}
+        self.section_sources, self.context_sources = build_sources(cfg)
+        tp = cfg.sources.get("tickpick")
+        self.compare_url: str | None = tp["url"] if tp else None
 
     # ---------------------------------------------------------- evaluation
 
@@ -430,7 +505,7 @@ class Engine:
         old_floor = zs.get("floor")
         is_new_low = old_floor is None or q.price < old_floor
         floor = q.price if is_new_low else old_floor
-        tiers = ZONE_TIERS[zone]
+        tiers = self.cfg.zone_tiers[zone]
 
         tier = self._tier_hit(zs, q.price, tiers, now)
         # momentum only on a genuine session low, so listing churn can't ping us
@@ -457,7 +532,7 @@ class Engine:
               floor: float) -> None:
         label = zone_label(zone)
         kind = tier or "drop"
-        threshold = ZONE_TIERS[zone].get(tier) if tier else None
+        threshold = self.cfg.zone_tiers[zone].get(tier) if tier else None
 
         headline = {
             "screaming": "SCREAMING DEAL",
@@ -468,9 +543,9 @@ class Engine:
 
         facts = [f"{q.section}"]
         if src.pair_verified:
-            facts += [f"{q.listings} pair listings", f"{MIN_SEATS} together ✓"]
+            facts += [f"{q.listings} pair listings", f"{self.cfg.min_seats} together ✓"]
         else:
-            facts += [f"{q.listings} listings", f"⚠ verify {MIN_SEATS} seats"]
+            facts += [f"{q.listings} listings", f"⚠ verify {self.cfg.min_seats} seats"]
         subtitle = " · ".join(facts)
 
         parts = []
@@ -490,7 +565,7 @@ class Engine:
         }[kind]
 
         notify(kind, title, subtitle, body, spoken,
-               url=src.buy_url, alt_url=TICKPICK_URL)
+               url=src.buy_url, alt_url=self.compare_url)
         if kind == "screaming":
             # no time to click — open the buy page immediately
             subprocess.run(["open", src.buy_url], check=False)
@@ -515,7 +590,7 @@ class Engine:
     def check_once(self, quiet: bool = False, with_context: bool = True) -> None:
         context = []
         if with_context:
-            for name, fn in CONTEXT_SOURCES:
+            for name, fn in self.context_sources:
                 try:
                     context.append(f"{name} min ${fn():.0f} (any qty)")
                 except Exception as e:
@@ -523,7 +598,7 @@ class Engine:
         if context:
             log("Context  " + " | ".join(context))
 
-        for src in SECTION_SOURCES:
+        for src in self.section_sources:
             try:
                 zones = src.fetch()
                 self.fail_counts[src.name] = 0
@@ -531,12 +606,12 @@ class Engine:
                 self._source_failed(src, e, quiet)
                 continue
 
-            log(f"{src.name:8s}" + " | ".join(
+            log(f"{src.name:9s}" + " | ".join(
                 f"{zone_label(z)}: ${q.price:.0f} ({q.section}, {q.listings} lst)"
                 for z, q in sorted(zones.items(), key=lambda kv: kv[1].price)
             ))
             for zone, q in zones.items():
-                if zone in ZONE_TIERS:
+                if zone in self.cfg.zone_tiers:
                     self.evaluate(src, zone, q, quiet)
 
         save_state(self.state)
@@ -600,13 +675,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--interval", type=int, default=POLL_SECONDS)
+    ap.add_argument("--config", type=Path, default=HERE / "config.json")
     args = ap.parse_args()
 
     # if the process dies from a native fault (C extension), capture a traceback
     _crash_fh = open(CRASH_LOG, "a")
     faulthandler.enable(file=_crash_fh)
 
-    engine = Engine(load_state())
+    cfg = load_config(args.config)
+    engine = Engine(cfg, load_state())
     if args.once:
         engine.check_once(quiet=True)
         return
@@ -615,21 +692,21 @@ def main() -> None:
     _announce_if_restart()
     threading.Thread(target=_watchdog, daemon=True).start()
 
-    log(f"Watching: {EVENT_NAME} — {MIN_SEATS}+ seats together (pid {os.getpid()})")
+    sources = "+".join(s.name for s in engine.section_sources)
+    log(f"Watching: {cfg.event} — {cfg.min_seats}+ seats together (pid {os.getpid()})")
     tiers_desc = "; ".join(
         f"{zone_label(z)} good<=${t['good']:.0f} scream<=${t['screaming']:.0f}"
-        for z, t in ZONE_TIERS.items()
+        for z, t in cfg.zone_tiers.items()
     )
     log(
         f"Tiers: {tiers_desc}. New-low drops >={DROP_ALERT_PCT:.0f}%. "
-        f"Vivid+StubHub every ~{args.interval}s, context every {CONTEXT_EVERY} "
+        f"{sources} every ~{args.interval}s, context every {CONTEXT_EVERY} "
         f"cycles. Phone: {'ntfy.sh/' + NTFY_TOPIC if NTFY_TOPIC else 'off'}. "
-        f"Auto-stop {SHOW_END_ISO[11:16]}."
+        f"Auto-stop {cfg.stop_at:%a %H:%M}."
     )
 
-    show_end = datetime.fromisoformat(SHOW_END_ISO)
     cycle = 0
-    while datetime.now() < show_end:
+    while datetime.now() < cfg.stop_at:
         try:
             engine.check_once(with_context=(cycle % CONTEXT_EVERY == 0))
         except Exception as e:
