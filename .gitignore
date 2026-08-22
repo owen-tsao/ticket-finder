@@ -1,0 +1,13 @@
+# virtualenv & bytecode
+.venv/
+__pycache__/
+*.pyc
+
+# runtime artifacts
+state.json
+*.log
+.heartbeat
+.watcher.lock
+
+# macOS
+.DS_Store
