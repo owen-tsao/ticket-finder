@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template: copy to ~/Library/LaunchAgents/com.YOU.ticket-watcher.plist,
+  replace /PATH/TO/ticket-finder with your clone path, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.YOU.ticket-watcher.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.YOU.ticket-watcher</string>
+
+    <!-- caffeinate -i keeps the Mac from idle-sleeping while the watcher runs -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/PATH/TO/ticket-finder/.venv/bin/python</string>
+        <string>/PATH/TO/ticket-finder/watcher.py</string>
+        <string>--interval</string>
+        <string>15</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/ticket-finder</string>
+
+    <!-- set your ntfy topic here for phone push (optional) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NTFY_TOPIC</key>
+        <string>your-long-random-topic-name</string>
+    </dict>
+
+    <!-- restart on crash; a clean exit (show ended) stays stopped -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/PATH/TO/ticket-finder/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/PATH/TO/ticket-finder/launchd.log</string>
+</dict>
+</plist>
