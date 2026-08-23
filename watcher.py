@@ -457,13 +457,18 @@ def notify(kind: str, title: str, subtitle: str, body: str,
 
 # ================================================================== engine
 
-def load_state() -> dict:
+def load_state(cfg: Config) -> dict:
+    """Prior state for this event; a different event starts fresh so session
+    lows and cooldowns never bleed across concerts."""
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            state = json.loads(STATE_FILE.read_text())
+            if state.get("_event") == cfg.event:
+                return state
+            log(f"state was for {state.get('_event')!r}; starting fresh")
         except (json.JSONDecodeError, OSError) as e:
             log(f"state.json unreadable ({e}); starting fresh")
-    return {}
+    return {"_event": cfg.event}
 
 
 def save_state(state: dict) -> None:
@@ -683,7 +688,7 @@ def main() -> None:
     faulthandler.enable(file=_crash_fh)
 
     cfg = load_config(args.config)
-    engine = Engine(cfg, load_state())
+    engine = Engine(cfg, load_state(cfg))
     if args.once:
         engine.check_once(quiet=True)
         return
