@@ -36,6 +36,13 @@ class Hit:
     min_price: float | None
     ids: dict = field(default_factory=dict)   # site-specific ids/urls
 
+    def to_dict(self) -> dict:
+        return {
+            "site": self.site, "name": self.name, "venue": self.venue,
+            "dt": self.dt.isoformat() if self.dt else None,
+            "min_price": self.min_price, "ids": self.ids,
+        }
+
 
 def _junescape(s: str) -> str:
     """Decode JSON string escapes (\\u0026 etc.) in regex-extracted text."""
@@ -213,15 +220,34 @@ def run_searches(query: str) -> dict[str, list[Hit]]:
     return results
 
 
-def pick_event(results: dict[str, list[Hit]]) -> Hit:
-    """Numbered list from the anchor site (Gametime, else Vivid, else any)."""
+def upcoming_anchors(results: dict[str, list[Hit]]) -> list[Hit]:
+    """Future events from the best-structured site that returned any."""
     for site in ("gametime", "vivid", "stubhub", "seatgeek", "tickpick"):
         anchors = [h for h in results[site] if h.dt and h.dt > datetime.now()]
         if anchors:
-            break
+            return sorted(anchors, key=lambda h: h.dt)
+    return []
+
+
+def match_sources(anchor: Hit, results: dict[str, list[Hit]]) -> tuple[dict[str, dict], dict[str, Hit]]:
+    """The anchor's ids plus every other site's match for the same concert.
+    Returns (config sources, the matched Hit per site for display)."""
+    sources: dict[str, dict] = {anchor.site: anchor.ids}
+    matches: dict[str, Hit] = {}
+    for site, hits in results.items():
+        if site != anchor.site:
+            match = next((h for h in hits if looks_like(anchor, h)), None)
+            if match:
+                sources[site] = match.ids
+                matches[site] = match
+    return sources, matches
+
+
+def pick_event(results: dict[str, list[Hit]]) -> Hit:
+    """Numbered list from the anchor site (Gametime, else Vivid, else any)."""
+    anchors = upcoming_anchors(results)
     if not anchors:
         sys.exit("No upcoming events found — try a different search.")
-    anchors.sort(key=lambda h: h.dt)
     print(f"\nUpcoming shows (via {anchors[0].site}):")
     for i, h in enumerate(anchors[:15], 1):
         price = f"from ${h.min_price:.0f}" if h.min_price else ""
@@ -281,14 +307,13 @@ def main() -> None:
     anchor = pick_event(results)
 
     # match the pick on every other site
-    sources: dict[str, dict] = {anchor.site: anchor.ids}
-    for site, hits in results.items():
+    sources, matches = match_sources(anchor, results)
+    for site in SEARCHERS:
         if site == anchor.site:
             continue
-        match = next((h for h in hits if looks_like(anchor, h)), None)
-        if match:
-            sources[site] = match.ids
-            print(f"  matched on {site:9s} {match.name} — {match.venue}")
+        if site in matches:
+            m = matches[site]
+            print(f"  matched on {site:9s} {m.name} — {m.venue}")
         else:
             print(f"  no match on {site} (that source will be skipped)")
 
