@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket Finder</title>
+<style>
+  :root {
+    --bg: #020617; --panel: #0b1120; --panel-2: #111a2e;
+    --border: #1e293b; --border-2: #334155;
+    --fg: #f8fafc; --muted: #8b98ad; --faint: #5b6778;
+    --accent: #22c55e; --accent-dim: #16a34a; --danger: #ef4444;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { color-scheme: dark; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 20px 80px; }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+  header h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 1px; }
+  .spacer { flex: 1; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 550;
+    border: 1px solid var(--border-2); color: var(--muted); white-space: nowrap;
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .pill.live { border-color: rgba(34,197,94,.4); color: var(--accent); }
+  .pill.live .dot { background: var(--accent); box-shadow: 0 0 8px rgba(34,197,94,.8); animation: pulse 2s infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  @media (prefers-reduced-motion: reduce) { .pill.live .dot { animation: none; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 18px;
+  }
+  .card h2 {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted); margin-bottom: 14px;
+  }
+
+  button {
+    font: inherit; font-size: 14px; font-weight: 550; cursor: pointer;
+    border-radius: 8px; border: 1px solid var(--border-2);
+    background: var(--panel-2); color: var(--fg);
+    padding: 8px 16px; transition: background .15s, border-color .15s, opacity .15s;
+  }
+  button:hover { background: #16223a; border-color: #47576f; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary {
+    background: var(--accent-dim); border-color: var(--accent-dim); color: #04120a;
+    color: #ffffff; font-weight: 600;
+  }
+  button.primary:hover { background: var(--accent); border-color: var(--accent); }
+  button.danger { color: #fca5a5; border-color: rgba(239,68,68,.35); }
+  button.danger:hover { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.6); }
+
+  .searchrow { display: flex; gap: 10px; }
+  input[type="text"], input[type="number"] {
+    font: inherit; color: var(--fg); background: var(--panel-2);
+    border: 1px solid var(--border-2); border-radius: 8px; padding: 9px 13px;
+    width: 100%; transition: border-color .15s;
+  }
+  input:focus { outline: none; border-color: var(--accent-dim); }
+  input::placeholder { color: var(--faint); }
+  input[type="number"] { width: 84px; text-align: right; }
+  input[type=number]::-webkit-inner-spin-button { opacity: .3; }
+
+  .hint { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .error { color: #fca5a5; font-size: 13px; margin-top: 10px; }
+
+  .results { margin-top: 6px; }
+  .event {
+    display: flex; align-items: center; gap: 16px; width: 100%; text-align: left;
+    padding: 13px 14px; margin-top: 8px; border-radius: 8px;
+    background: transparent; border: 1px solid var(--border);
+  }
+  .event:hover { background: var(--panel-2); border-color: var(--border-2); }
+  .event .date {
+    flex: none; width: 64px; text-align: center; line-height: 1.25;
+    color: var(--accent); font-weight: 600; font-size: 13px;
+  }
+  .event .date small { display: block; color: var(--muted); font-weight: 500; font-size: 11px; }
+  .event .info { flex: 1; min-width: 0; }
+  .event .name { font-weight: 600; }
+  .event .venue { color: var(--muted); font-size: 13px; }
+  .event .from { flex: none; color: var(--muted); font-size: 13px; }
+  .event .from b { color: var(--fg); font-weight: 600; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 4px 0 16px; }
+  .chip {
+    font-size: 12px; font-weight: 550; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border-2); color: var(--muted);
+  }
+  .chip.on { border-color: rgba(34,197,94,.4); color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); padding: 0 10px 8px 0;
+  }
+  th.num, td.num { text-align: right; }
+  td { padding: 9px 10px 9px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  td .zl { font-weight: 600; }
+  .thresh { display: flex; gap: 8px; justify-content: flex-end; }
+
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+  .seats { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+
+  .prices { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .price {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .price .z { font-size: 12px; color: var(--muted); }
+  .price .v { font-size: 19px; font-weight: 650; margin-top: 1px; }
+  .price .s { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  pre.log {
+    background: #050a15; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; font-size: 11.5px; line-height: 1.6; color: var(--muted);
+    overflow-x: auto; margin-top: 14px;
+  }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .meta b { color: var(--fg); }
+  .hidden { display: none; }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; vertical-align: -2px;
+    border: 2px solid var(--border-2); border-top-color: var(--accent);
+    border-radius: 50%; animation: rot .7s linear infinite; margin-right: 8px;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Ticket Finder</h1>
+      <div class="sub">last-minute price-drop watcher</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">checking…</span></span>
+    <button id="toggleBtn" class="hidden"></button>
+  </header>
+
+  <section class="card hidden" id="watchCard">
+    <h2>Now watching</h2>
+    <div class="meta" id="watchMeta"></div>
+    <div class="prices" id="priceGrid"></div>
+    <pre class="log hidden" id="logTail"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Find a concert</h2>
+    <div class="searchrow">
+      <input type="text" id="q" placeholder="artist or venue — try “weezer san francisco”" autofocus>
+      <button class="primary" id="searchBtn">Search</button>
+    </div>
+    <div id="searchNote" class="hint hidden"></div>
+    <div class="results" id="results"></div>
+  </section>
+
+  <section class="card hidden" id="setupCard">
+    <h2>Set up the watch</h2>
+    <div class="meta" id="setupMeta"></div>
+    <div class="chips" id="siteChips"></div>
+    <table>
+      <thead><tr><th>Zone</th><th class="num">Now</th><th class="num">Good ≤ / Screaming ≤ ($)</th></tr></thead>
+      <tbody id="zoneRows"></tbody>
+    </table>
+    <div class="actions">
+      <label class="seats">Seats together
+        <input type="number" id="seats" value="2" min="1" max="10">
+      </label>
+      <div class="spacer"></div>
+      <button id="saveBtn">Save config</button>
+      <button class="primary" id="saveStartBtn">Save &amp; start watching</button>
+    </div>
+    <div id="setupNote" class="error hidden"></div>
+  </section>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+};
+const money = v => v == null ? "—" : "$" + Math.round(v);
+const when = iso => {
+  const d = new Date(iso);
+  return {
+    day: d.toLocaleDateString([], {month: "short", day: "numeric"}),
+    wk: d.toLocaleDateString([], {weekday: "short"}),
+    time: d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}),
+    year: d.getFullYear(),
+  };
+};
+
+/* ------------------------------------------------------------------ status */
+let running = false;
+async function refreshStatus() {
+  try {
+    const s = await api("/api/status");
+    running = s.running;
+    const pill = $("statusPill");
+    pill.classList.toggle("live", s.running);
+    $("statusText").textContent = s.running ? "watching" : "idle";
+    const btn = $("toggleBtn");
+    btn.classList.toggle("hidden", !s.config);
+    btn.textContent = s.running ? "Stop" : "Start watcher";
+    btn.className = s.running ? "danger" : "";
+
+    const card = $("watchCard");
+    card.classList.toggle("hidden", !s.config);
+    if (s.config) {
+      const tiers = Object.entries(s.config.zones || {})
+        .map(([z, t]) => `${esc(z)} ≤ $${t.good} / $${t.screaming}`).join(" · ");
+      $("watchMeta").innerHTML =
+        `<b>${esc(s.config.event)}</b><br>${tiers}` +
+        ` · ${s.config.min_seats}+ seats · ${ (s.config.sites || []).join(", ") }`;
+      const cheapest = {};
+      for (const p of s.prices) {
+        if (p.min == null) continue;
+        if (!cheapest[p.zone] || p.min < cheapest[p.zone].min) cheapest[p.zone] = p;
+      }
+      $("priceGrid").innerHTML = Object.entries(cheapest)
+        .sort((a, b) => a[1].min - b[1].min)
+        .map(([z, p]) => `<div class="price"><div class="z">${esc(z)}</div>` +
+          `<div class="v mono">${money(p.min)}</div>` +
+          `<div class="s">${esc(p.section || "")} · ${esc(p.source)}</div></div>`)
+        .join("") || `<div class="hint">No prices yet — they appear after the first poll.</div>`;
+      const log = $("logTail");
+      log.classList.toggle("hidden", !s.running || !s.log.length);
+      log.textContent = s.log.join("\n");
+    }
+  } catch { /* server briefly busy during searches; next poll catches up */ }
+}
+$("toggleBtn").onclick = async () => {
+  $("toggleBtn").disabled = true;
+  try { await api(running ? "/api/watcher/stop" : "/api/watcher/start", {}); }
+  finally {
+    setTimeout(async () => { await refreshStatus(); $("toggleBtn").disabled = false; }, 600);
+  }
+};
+
+/* ------------------------------------------------------------------ search */
+let lastQuery = "";
+async function search() {
+  const q = $("q").value.trim();
+  if (!q) return;
+  lastQuery = q;
+  $("setupCard").classList.add("hidden");
+  $("results").innerHTML = "";
+  note("searchNote", `<span class="spin"></span>Searching five marketplaces…`);
+  $("searchBtn").disabled = true;
+  try {
+    const d = await api("/api/search?q=" + encodeURIComponent(q));
+    if (!d.events.length) { note("searchNote", "No upcoming shows found — try different words."); return; }
+    note("searchNote", `${d.events.length} upcoming show${d.events.length > 1 ? "s" : ""} — pick one to set up alerts.`);
+    $("results").innerHTML = d.events.map((e, i) => {
+      const w = when(e.dt);
+      return `<button class="event" data-i="${i}">
+        <span class="date">${esc(w.day)}<small>${esc(w.wk)} · ${esc(w.time)}</small></span>
+        <span class="info"><div class="name">${esc(e.name)}</div>
+          <div class="venue">${esc(e.venue)}</div></span>
+        <span class="from">${e.min_price ? `from <b class="mono">${money(e.min_price)}</b>` : ""}</span>
+      </button>`;
+    }).join("");
+    const events = d.events;
+    document.querySelectorAll(".event").forEach(el =>
+      el.onclick = () => select(events[+el.dataset.i]));
+  } catch (e) {
+    note("searchNote", "Search failed: " + esc(e.message));
+  } finally { $("searchBtn").disabled = false; }
+}
+$("searchBtn").onclick = search;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+
+/* ------------------------------------------------------------------ select */
+let picked = null;
+async function select(anchor) {
+  picked = null;
+  note("searchNote", `<span class="spin"></span>Matching “${esc(anchor.name)}” across sites and pulling live prices…`);
+  try {
+    const d = await api("/api/select", {query: lastQuery, anchor});
+    picked = d;
+    note("searchNote", "");
+    $("searchNote").classList.add("hidden");
+    const w = when(d.anchor.dt);
+    $("setupMeta").innerHTML =
+      `<b>${esc(d.anchor.name)}</b> — ${esc(d.anchor.venue)} · ${esc(w.wk)} ${esc(w.day)} ${w.year}, ${esc(w.time)}`;
+    const sites = ["gametime", "vivid", "stubhub", "tickpick", "seatgeek"];
+    $("siteChips").innerHTML = sites.map(s =>
+      `<span class="chip ${d.sources[s] ? "on" : ""}">${s}${d.sources[s] ? "" : " — no match"}</span>`).join("");
+    $("zoneRows").innerHTML = d.zones.map(z => `
+      <tr data-zone="${esc(z.zone)}">
+        <td><span class="zl">${esc(z.label)}</span></td>
+        <td class="num mono">${money(z.min)}</td>
+        <td class="num"><span class="thresh">
+          <input type="number" class="good" placeholder="good" aria-label="${esc(z.label)} good threshold">
+          <input type="number" class="scream" placeholder="scream" aria-label="${esc(z.label)} screaming threshold">
+        </span></td>
+      </tr>`).join("") ||
+      `<tr><td colspan="3" class="hint">No zone data — the section sources may be blocked right now.</td></tr>`;
+    $("setupCard").classList.remove("hidden");
+    $("setupCard").scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (e) {
+    note("searchNote", "Couldn’t set up that event: " + esc(e.message));
+  }
+}
+
+/* -------------------------------------------------------------------- save */
+async function save(start) {
+  const zones = {};
+  document.querySelectorAll("#zoneRows tr[data-zone]").forEach(tr => {
+    const good = parseFloat(tr.querySelector(".good").value);
+    const scream = parseFloat(tr.querySelector(".scream").value);
+    if (!isNaN(good) && !isNaN(scream))
+      zones[tr.dataset.zone] = {good: Math.max(good, scream), screaming: Math.min(good, scream)};
+  });
+  if (!Object.keys(zones).length) {
+    note("setupNote", "Enter both thresholds for at least one zone."); return;
+  }
+  note("setupNote", "");
+  $("setupNote").classList.add("hidden");
+  $("saveBtn").disabled = $("saveStartBtn").disabled = true;
+  try {
+    const d = await api("/api/config", {
+      anchor: picked.anchor, sources: picked.sources, zones,
+      min_seats: parseInt($("seats").value) || 2, start,
+    });
+    if (!d.ok) { note("setupNote", esc(d.error)); return; }
+    $("setupCard").classList.add("hidden");
+    $("results").innerHTML = "";
+    window.scrollTo({top: 0, behavior: "smooth"});
+    setTimeout(refreshStatus, start ? 900 : 100);
+  } catch (e) {
+    note("setupNote", "Save failed: " + esc(e.message));
+  } finally { $("saveBtn").disabled = $("saveStartBtn").disabled = false; }
+}
+$("saveBtn").onclick = () => save(false);
+$("saveStartBtn").onclick = () => save(true);
+
+function note(id, html) {
+  const el = $(id);
+  el.classList.toggle("hidden", !html);
+  el.innerHTML = html;
+}
+
+refreshStatus();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ from datetime import datetime
 import pytest
 
 import discover
+import ui
 import watcher
 from watcher import Config, Engine, Quote, Source
 
@@ -223,13 +224,18 @@ class TestVividParser:
 
 
 class TestState:
-    def test_roundtrip(self):
-        watcher.save_state({"Test:Lower": {"min": 250.0}})
-        assert watcher.load_state() == {"Test:Lower": {"min": 250.0}}
+    def test_roundtrip_same_event(self):
+        watcher.save_state({"_event": CFG.event, "Test:Lower": {"min": 250.0}})
+        assert watcher.load_state(CFG)["Test:Lower"] == {"min": 250.0}
+
+    def test_other_events_state_is_discarded(self):
+        # session lows/cooldowns from a previous concert must not carry over
+        watcher.save_state({"_event": "Some Other Show", "Test:Lower": {"min": 250.0}})
+        assert watcher.load_state(CFG) == {"_event": CFG.event}
 
     def test_corrupt_file_starts_fresh(self):
         watcher.STATE_FILE.write_text("{not json")
-        assert watcher.load_state() == {}
+        assert watcher.load_state(CFG) == {"_event": CFG.event}
 
 
 def test_zone_labels():
@@ -337,3 +343,37 @@ class TestEventMatching:
 
     def test_json_escapes_decoded(self):
         assert discover._junescape("Shins \\u0026 Pickups") == "Shins & Pickups"
+
+
+# ------------------------------------------------------------------ UI server
+
+
+class TestUiSave:
+    BODY = {
+        "anchor": {
+            "site": "gametime", "name": "Weezer",
+            "venue": "Chase Center, San Francisco",
+            "dt": "2026-09-09T19:00:00", "min_price": 35.0, "ids": {},
+        },
+        "sources": {"vivid": {"production_id": 1, "buy_url": "u"}},
+        "zones": {"Lower": {"good": 120, "screaming": 90}},
+        "min_seats": 2,
+    }
+
+    @pytest.fixture(autouse=True)
+    def sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ui, "HERE", tmp_path)
+        self.tmp = tmp_path
+
+    def test_save_writes_a_config_the_watcher_accepts(self):
+        res = ui.api_save(self.BODY)
+        assert res["ok"]
+        cfg = watcher.load_config(self.tmp / "config.json")
+        assert cfg.zone_tiers["Lower"] == {"good": 120.0, "screaming": 90.0}
+        assert cfg.stop_at == datetime(2026, 9, 9, 20, 30)   # start + 90 min
+        assert "Weezer" in cfg.event
+
+    def test_save_without_zones_is_rejected(self):
+        res = ui.api_save({**self.BODY, "zones": {}})
+        assert not res["ok"]
+        assert not (self.tmp / "config.json").exists()

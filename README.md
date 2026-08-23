@@ -55,6 +55,11 @@ One watcher (`watcher.py`), three layers:
 - **notifier** — fans one alert out to Mac, voice, and phone. Everything is
   non-blocking; a stuck notification can never stall the poll loop.
 
+Plus an optional local web UI (`ui.py`): a stdlib `http.server` serving one
+static page that reuses the discovery and watcher code directly. Zero extra
+dependencies, by choice — at this size, a React/Node frontend would double
+the install burden of the whole project to render one page.
+
 ## The paranoid part
 
 This thing only matters for a few hours, and it must not die quietly in the
@@ -84,14 +89,31 @@ brew install terminal-notifier     # optional, for clickable Mac notifications
 
 ## Pick a concert
 
+The easiest way is the built-in UI:
+
+```bash
+.venv/bin/python ui.py     # → http://127.0.0.1:8321
+```
+
+One dark little page, served straight from Python — no Node, no build step,
+nothing extra to install. Search an artist, click the show, and it matches
+the concert across all five marketplaces, shows you the live per-zone
+minimums, and lets you set thresholds and hit **Save & start watching**.
+While the watcher runs, the page shows the cheapest price per zone and a
+live log tail, with a stop button when you're done.
+
+The same flow also works entirely in the terminal:
+
 ```bash
 .venv/bin/python discover.py "weezer san francisco"
 ```
 
-This searches all five marketplaces, shows you the upcoming shows that
-match, and — once you pick one — finds the same concert on the other sites
-(matching by date and venue), pulls the live per-zone minimums so you can
-set thresholds with real numbers in front of you, and writes `config.json`:
+Either way you end up with a `config.json` — plain JSON and safe to
+hand-edit (see `config.example.json`). One config per event; run a second
+watcher with `--config` to track two shows at once.
+
+<details>
+<summary>What the CLI flow looks like</summary>
 
 ```
 Upcoming shows (via gametime):
@@ -107,9 +129,7 @@ Current zone minimums (all-in, cheapest across sites):
   Floor   $215
 ```
 
-`config.json` is plain JSON and safe to hand-edit (see
-`config.example.json`) — one config per event; run a second watcher with
-`--config` to track two shows at once.
+</details>
 
 ## Run
 
