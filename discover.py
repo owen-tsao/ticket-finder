@@ -11,9 +11,11 @@ prompts for your alert thresholds.
 """
 
 import argparse
+import html
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,31 +37,53 @@ class Hit:
     dt: datetime | None
     min_price: float | None
     ids: dict = field(default_factory=dict)   # site-specific ids/urls
+    time_known: bool = True   # False: dt's date is right but the time isn't
+                              # (StubHub epochs render in the viewer's tz)
 
     def to_dict(self) -> dict:
         return {
             "site": self.site, "name": self.name, "venue": self.venue,
             "dt": self.dt.isoformat() if self.dt else None,
             "min_price": self.min_price, "ids": self.ids,
+            "time_known": self.time_known,
         }
 
 
 def _junescape(s: str) -> str:
-    """Decode JSON string escapes (\\u0026 etc.) in regex-extracted text."""
+    """Decode JSON string escapes (\\u0026) and HTML entities (&amp;) in
+    regex-extracted text — marketplace pages mix both."""
     try:
-        return json.loads(f'"{s}"')
+        s = json.loads(f'"{s}"')
     except json.JSONDecodeError:
-        return s
+        pass
+    return html.unescape(s)
 
 
 def _tokens(s: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", s.lower()) if len(t) > 2}
 
 
+# StubHub et al. use midnight/noon as "time TBD" placeholders; treat those
+# times as unknown rather than as evidence of a different show
+_PLACEHOLDER_TIMES = {(0, 0), (12, 0)}
+
+
+def _time_known(h: Hit) -> bool:
+    return (h.time_known and h.dt is not None
+            and (h.dt.hour, h.dt.minute) not in _PLACEHOLDER_TIMES)
+
+
 def looks_like(anchor: Hit, hit: Hit) -> bool:
-    """Same concert? Same local date + overlapping venue or artist tokens."""
-    if anchor.dt and hit.dt and anchor.dt.date() != hit.dt.date():
-        return False
+    """Same concert? Same local date (and, when both sides have real times,
+    within 3h — a matinee and an evening show are different events, but
+    door-time vs showtime listings for one show differ by an hour or so)
+    plus overlapping venue and artist tokens."""
+    if anchor.dt and hit.dt:
+        if anchor.dt.date() != hit.dt.date():
+            return False
+        if (_time_known(anchor) and _time_known(hit)
+                and abs((anchor.dt - hit.dt).total_seconds()) > 3 * 3600):
+            return False
     venue_ok = bool(_tokens(anchor.venue) & _tokens(hit.venue))
     name_ok = bool(_tokens(anchor.name) & _tokens(hit.name))
     return venue_ok and name_ok
@@ -73,13 +97,15 @@ def search_gametime(q: str) -> list[Hit]:
     for item in d.get("events", []):
         e = item.get("event", {})
         v = item.get("venue") or {}
+        perf = (item.get("performers") or [{}])[0]
         total = (e.get("min_price") or {}).get("total") or 0
         hits.append(Hit(
             "gametime", e.get("name", "?"),
             f"{v.get('name', '?')}, {v.get('city', '?')}",
             datetime.fromisoformat(e["datetime_local"]) if e.get("datetime_local") else None,
             total / 100 or None,
-            {"event_id": e.get("id"), "buy_url": e.get("seo_url")},
+            {"event_id": e.get("id"), "buy_url": e.get("seo_url"),
+             "image": perf.get("hero_image_url")},
         ))
     return hits
 
@@ -125,11 +151,15 @@ def search_stubhub(q: str) -> list[Hit]:
             continue
         venue = re.search(r'VenueInfo[^>]*>(?:<[^>]+>|</[^>]+>)*([^<]{3,})', block)
         hits.append(Hit(
-            "stubhub", link.group(3),
-            venue.group(1).strip() if venue else "?",
+            "stubhub", _junescape(link.group(3)),
+            _junescape(venue.group(1).strip()) if venue else "?",
+            # the epoch is absolute, so fromtimestamp() renders it in the
+            # *viewer's* timezone — right for local shows, hours off for a
+            # London gig viewed from California. Date is trustworthy, time isn't.
             datetime.fromtimestamp(int(ts.group(1)) / 1000),
             None,
             {"url": "https://www.stubhub.ie" + link.group(1)},
+            time_known=False,
         ))
     return hits
 
@@ -160,7 +190,7 @@ def search_tickpick(q: str) -> list[Hit]:
                 pass
         hits.append(Hit(
             "tickpick", _junescape(m.group(2)),
-            f"{venue.group(1) if venue else '?'}, {city.group(1) if city else '?'}",
+            _junescape(f"{venue.group(1) if venue else '?'}, {city.group(1) if city else '?'}"),
             dt, float(price.group(1)) if price else None,
             {"event_id": m.group(1),
              "url": "https://www.tickpick.com" + slug.group(1)},
@@ -184,8 +214,8 @@ def search_seatgeek(q: str) -> list[Hit]:
         price = re.search(r'"lowest_price":([\d.]+)', window)
         venue = re.search(r'"venue":\{[^{}]*?"name":"([^"]+)"', window)
         hits.append(Hit(
-            "seatgeek", m.group(1),
-            venue.group(1) if venue else "?",
+            "seatgeek", _junescape(m.group(1)),
+            _junescape(venue.group(1)) if venue else "?",
             datetime.fromisoformat(dt.group(1)[:19]) if dt else None,
             float(price.group(1)) if price else None,
             {"event_id": url.group(2), "url": url.group(1)},
@@ -206,27 +236,50 @@ SEARCHERS = {
 
 def run_searches(query: str) -> dict[str, list[Hit]]:
     q = requests.utils.quote(query) if hasattr(requests, "utils") else query.replace(" ", "%20")
-    results: dict[str, list[Hit]] = {}
-    for site, fn in SEARCHERS.items():
-        try:
+
+    def one_site(fn) -> list[Hit]:
+        hits = [h for h in fn(q) if "parking" not in h.name.lower()]
+        if not hits:   # marketplaces occasionally whiff; one retry is cheap
             hits = [h for h in fn(q) if "parking" not in h.name.lower()]
-            if not hits:   # marketplaces occasionally whiff; one retry is cheap
-                hits = [h for h in fn(q) if "parking" not in h.name.lower()]
-            results[site] = hits
-            print(f"  {site:9s} {len(hits)} events")
-        except Exception as e:
-            results[site] = []
-            print(f"  {site:9s} search failed ({type(e).__name__})")
+        return hits
+
+    # each site is one or two network round-trips; running them concurrently
+    # makes total search time the slowest site instead of the sum of all five
+    results: dict[str, list[Hit]] = {}
+    with ThreadPoolExecutor(max_workers=len(SEARCHERS)) as pool:
+        futures = {site: pool.submit(one_site, fn) for site, fn in SEARCHERS.items()}
+        for site, fut in futures.items():
+            try:
+                results[site] = fut.result()
+                print(f"  {site:9s} {len(results[site])} events")
+            except Exception as e:
+                results[site] = []
+                print(f"  {site:9s} search failed ({type(e).__name__})")
     return results
 
 
 def upcoming_anchors(results: dict[str, list[Hit]]) -> list[Hit]:
-    """Future events from the best-structured site that returned any."""
+    """Future events merged across every site, deduplicated (same date +
+    venue/name tokens). Sites are visited best-structured-first so each
+    show's anchor keeps the richest ids; merging matters because e.g.
+    Gametime's search API silently caps at 10 results."""
+    merged: list[Hit] = []
     for site in ("gametime", "vivid", "stubhub", "seatgeek", "tickpick"):
-        anchors = [h for h in results[site] if h.dt and h.dt > datetime.now()]
-        if anchors:
-            return sorted(anchors, key=lambda h: h.dt)
-    return []
+        for h in results.get(site, []):
+            if not h.dt or h.dt <= datetime.now():
+                continue
+            dup = next((kept for kept in merged if looks_like(kept, h)), None)
+            if dup is not None:
+                # a duplicate can still improve the anchor: adopt its showtime
+                # when ours is a placeholder or viewer-tz-shifted (StubHub),
+                # and its price when we have none (StubHub search has no prices)
+                if _time_known(h) and not _time_known(dup):
+                    dup.dt, dup.time_known = h.dt, True
+                if dup.min_price is None and h.min_price is not None:
+                    dup.min_price = h.min_price
+                continue
+            merged.append(h)
+    return sorted(merged, key=lambda h: h.dt)
 
 
 def match_sources(anchor: Hit, results: dict[str, list[Hit]]) -> tuple[dict[str, dict], dict[str, Hit]]:
@@ -244,55 +297,62 @@ def match_sources(anchor: Hit, results: dict[str, list[Hit]]) -> tuple[dict[str,
 
 
 def pick_event(results: dict[str, list[Hit]]) -> Hit:
-    """Numbered list from the anchor site (Gametime, else Vivid, else any)."""
+    """Numbered list of upcoming shows, merged across all marketplaces."""
     anchors = upcoming_anchors(results)
     if not anchors:
         sys.exit("No upcoming events found — try a different search.")
-    print(f"\nUpcoming shows (via {anchors[0].site}):")
+    print("\nUpcoming shows (merged across marketplaces):")
     for i, h in enumerate(anchors[:15], 1):
         price = f"from ${h.min_price:.0f}" if h.min_price else ""
-        print(f"  {i:2d}. {h.dt:%a %b %-d %Y %-I:%M %p}  {h.name} — {h.venue}  {price}")
+        when = (f"{h.dt:%a %b %-d %Y %-I:%M %p}" if _time_known(h)
+                else f"{h.dt:%a %b %-d %Y}")
+        print(f"  {i:2d}. {when}  {h.name} — {h.venue}  {price}")
     while True:
         raw = input("\nWatch which one? ").strip()
         if raw.isdigit() and 1 <= int(raw) <= len(anchors[:15]):
             return anchors[int(raw) - 1]
 
 
-def snapshot_zones(sources: dict) -> dict[str, float]:
-    """Live per-zone minimums from whichever section sources matched."""
-    mins: dict[str, float] = {}
+def snapshot_zones(sources: dict) -> dict[str, tuple[float, str]]:
+    """Live per-zone (minimum, currency) from whichever section sources
+    matched. Minimums only merge within the same currency — StubHub reports
+    intl events in local currency, and £66 is not less than $90."""
+    mins: dict[str, tuple[float, str]] = {}
     fetchers = {
         "gametime": lambda c: watcher.fetch_gametime_zones(c["event_id"], 2),
         "vivid": lambda c: watcher.fetch_vivid_zones(c["production_id"], 2),
         "stubhub": lambda c: watcher.fetch_stubhub_zones(c["url"]),
     }
-    for site, fetch in fetchers.items():
-        if site not in sources:
-            continue
-        try:
-            for zone, q in fetch(sources[site]).items():
-                if zone not in mins or q.price < mins[zone]:
-                    mins[zone] = q.price
-        except Exception as e:
-            print(f"  ({site} zone snapshot failed: {type(e).__name__})")
+    active = {s: f for s, f in fetchers.items() if s in sources}
+    with ThreadPoolExecutor(max_workers=len(active) or 1) as pool:
+        futures = {s: pool.submit(f, sources[s]) for s, f in active.items()}
+        for site, fut in futures.items():
+            try:
+                for zone, q in fut.result().items():
+                    have = mins.get(zone)
+                    if have is None or (have[1] == q.currency and q.price < have[0]):
+                        mins[zone] = (q.price, q.currency)
+            except Exception as e:
+                print(f"  ({site} zone snapshot failed: {type(e).__name__})")
     return mins
 
 
-def prompt_tiers(zone_mins: dict[str, float]) -> dict[str, dict[str, float]]:
-    print("\nCurrent zone minimums (all-in, cheapest across sites):")
-    for zone, price in sorted(zone_mins.items(), key=lambda kv: kv[1]):
-        print(f"  {zone_label(zone):25s} ${price:.0f}")
-    print("\nSet alert thresholds per zone — enter 'good screaming' (e.g. '200 150'),")
+def prompt_tiers(zone_mins: dict[str, tuple[float, str]]) -> dict[str, dict]:
+    print("\nCurrent zone minimums (all-in, cheapest across sites, before fees):")
+    for zone, (price, cur) in sorted(zone_mins.items(), key=lambda kv: kv[1][0]):
+        print(f"  {zone_label(zone):25s} {watcher.cur_sym(cur)}{price:.0f}")
+    print("\nSet alert thresholds per zone — enter 'deal steal' (e.g. '200 150'),")
     print("or press Enter to skip a zone.")
-    tiers: dict[str, dict[str, float]] = {}
-    for zone in sorted(zone_mins, key=zone_mins.get):
+    tiers: dict[str, dict] = {}
+    for zone in sorted(zone_mins, key=lambda z: zone_mins[z][0]):
         if zone == "Other":
             continue
-        raw = input(f"  {zone_label(zone)} (now ${zone_mins[zone]:.0f}): ").strip()
+        price, cur = zone_mins[zone]
+        raw = input(f"  {zone_label(zone)} (now {watcher.cur_sym(cur)}{price:.0f}): ").strip()
         parts = raw.split()
         if len(parts) == 2:
-            good, screaming = sorted((float(parts[0]), float(parts[1])), reverse=True)
-            tiers[zone] = {"good": good, "screaming": screaming}
+            deal, steal = sorted((float(parts[0]), float(parts[1])), reverse=True)
+            tiers[zone] = {"deal": deal, "steal": steal, "currency": cur}
     return tiers
 
 
@@ -324,17 +384,40 @@ def main() -> None:
         sys.exit("No zones selected — nothing to watch, config not written.")
 
     seats = input("\nSeats needed together [2]: ").strip()
-    cfg = {
-        "event": f"{anchor.name} @ {anchor.venue} ({anchor.dt:%a %b %-d, %-I:%M %p})",
+    when = (f"{anchor.dt:%a %b %-d, %-I:%M %p}" if anchor.time_known
+            else f"{anchor.dt:%a %b %-d}")
+    event = {
+        "id": f"{anchor.name}|{anchor.dt.isoformat(timespec='seconds')}",
+        "event": f"{anchor.name} @ {anchor.venue} ({when})",
+        "name": anchor.name,
+        "venue": anchor.venue,
+        "dt": anchor.dt.isoformat(timespec="seconds"),
+        "time_known": anchor.time_known,
+        "image": anchor.ids.get("image"),
         "stop_at": (anchor.dt + timedelta(minutes=90)).isoformat(timespec="seconds"),
         "min_seats": int(seats) if seats.isdigit() else 2,
         "zones": tiers,
         "sources": sources,
     }
+    existing = {"events": []}
     if args.config.exists():
-        if input(f"{args.config} exists — overwrite? [y/N] ").strip().lower() != "y":
-            sys.exit("Aborted.")
-    args.config.write_text(json.dumps(cfg, indent=2) + "\n")
+        try:
+            raw = json.loads(args.config.read_text())
+            existing["events"] = raw["events"] if "events" in raw else [raw]
+            if raw.get("ntfy_topic"):            # keep phone-push setting
+                existing["ntfy_topic"] = raw["ntfy_topic"]
+        except (json.JSONDecodeError, OSError):
+            pass
+        if existing["events"] and input(
+            f"{args.config} already tracks {len(existing['events'])} event(s) — "
+            f"add this one to it? [Y/n] "
+        ).strip().lower() == "n":
+            existing["events"] = []
+    existing["events"] = [
+        e for e in existing["events"]
+        if e.get("id") != event["id"] and e.get("event") != event["event"]
+    ] + [event]
+    args.config.write_text(json.dumps(existing, indent=2) + "\n")
     print(f"\nWrote {args.config} — start watching with:\n  .venv/bin/python watcher.py")
 
 
