@@ -1,4 +1,4 @@
-# Ticket Finder
+# Doors
 
 A little watcher that stares at resale ticket prices so you don't have to.
 
@@ -10,22 +10,22 @@ several times that earlier in the day.
 
 ## What it does
 
-Point it at a concert (there's a built-in search — see below) and every
-~15 seconds it checks Gametime, Vivid Seats, and StubHub for the cheapest
-listing in each zone you care about (floor, lower bowl, ...), for two or more
-seats together. When a price crosses one of your thresholds, it tells you
-immediately — everywhere:
+Search for a show in the web UI, set your prices, and every ~15 seconds the
+watcher checks Gametime, Vivid Seats, and StubHub for the cheapest listing in
+each zone you care about (floor, lower bowl, ...), for two or more seats
+together. It can track several shows at once. When a price crosses one of
+your thresholds, it tells you immediately — everywhere:
 
 - a clickable Mac notification that deep-links straight to the buy page
-- a spoken alert (`say`), because you might not be looking at the screen
 - a push notification on your phone via [ntfy.sh](https://ntfy.sh), with buy buttons
+- for steals only: a spoken alert (`say`) and the buy page opening itself
 
 Alerts come in three flavors:
 
 | | Alert | Trigger |
 | --- | --- | --- |
-| 🔥 | Good deal | price at or under your "good" threshold for that zone |
-| 🚨 | Screaming deal | under your "screaming" threshold — also auto-opens the buy page |
+| 🔥 | Deal | price at or under your "deal" threshold for that zone |
+| 🚨 | Steal | under your "steal" threshold — also auto-opens the buy page |
 | 📉 | Price drop | a zone hits a new session low, ≥5% below the last poll |
 
 TickPick and SeatGeek event minimums are logged alongside as context, so you
@@ -35,7 +35,9 @@ The details are tuned from getting burned: alerts show all-in prices but
 include the pre-fee estimate (so you can actually find the listing on the
 site), a tier won't re-fire until 15 minutes pass or the price drops another
 $5, and "price drop" only fires on a genuine new low — a cheap listing
-selling out and a pricier one rotating in doesn't count.
+selling out and a pricier one rotating in doesn't count. International shows
+are priced in their own currency, and a £66 ticket is never mistaken for
+being cheaper than a $90 threshold.
 
 ## How it's built
 
@@ -50,13 +52,14 @@ One watcher (`watcher.py`), three layers:
   event-level minimums as context. The parsing is pure functions, so it's
   all unit-testable without network.
 - **engine** — decides when a quote deserves an alert: tier thresholds,
-  re-alert cooldowns, session-low tracking. State survives restarts via
-  atomic writes to `state.json`.
-- **notifier** — fans one alert out to Mac, voice, and phone. Everything is
-  non-blocking; a stuck notification can never stall the poll loop.
+  re-alert cooldowns, session-low tracking. One engine per tracked show;
+  state survives restarts via atomic writes to `state.json`.
+- **notifier** — fans one alert out to Mac, phone, and (for steals) voice.
+  Everything is non-blocking; a stuck notification can never stall the poll
+  loop.
 
-Plus an optional local web UI (`ui.py`): a stdlib `http.server` serving one
-static page that reuses the discovery and watcher code directly. Zero extra
+Plus a local web UI (`ui.py`): a stdlib `http.server` serving one static
+page that reuses the discovery and watcher code directly. Zero extra
 dependencies, by choice — at this size, a React/Node frontend would double
 the install burden of the whole project to render one page.
 
@@ -87,7 +90,7 @@ python3 -m venv .venv
 brew install terminal-notifier     # optional, for clickable Mac notifications
 ```
 
-## Pick a concert
+## Track a show
 
 The easiest way is the built-in UI:
 
@@ -95,12 +98,18 @@ The easiest way is the built-in UI:
 .venv/bin/python ui.py     # → http://127.0.0.1:8321
 ```
 
-One dark little page, served straight from Python — no Node, no build step,
-nothing extra to install. Search an artist, click the show, and it matches
-the concert across all five marketplaces, shows you the live per-zone
-minimums, and lets you set thresholds and hit **Save & start watching**.
-While the watcher runs, the page shows the cheapest price per zone and a
-live log tail, with a stop button when you're done.
+One page, served straight from Python — no Node, no build step, nothing
+extra to install. Search an artist (the five marketplaces are queried in
+parallel and merged, so one search covers all of them), click the show, and
+it matches the concert across every site, shows you the live per-zone
+minimums, and lets you set deal/steal thresholds and hit **Save & start
+watching**. Tracked shows appear as cards with live cheapest-per-zone
+prices; add as many as you like, remove them when you're done.
+
+Phone pushes are set up from the UI too — the **Phone alerts** chip in the
+header walks you through installing ntfy, subscribing to a generated private
+topic, and sending yourself a test. The topic works like a password (anyone
+who knows it can read your alerts), which is why it's long and random.
 
 The same flow also works entirely in the terminal:
 
@@ -108,22 +117,21 @@ The same flow also works entirely in the terminal:
 .venv/bin/python discover.py "weezer san francisco"
 ```
 
-Either way you end up with a `config.json` — plain JSON and safe to
-hand-edit (see `config.example.json`). One config per event; run a second
-watcher with `--config` to track two shows at once.
+Either way you end up with a `config.json` — plain JSON, one entry per
+tracked show, and safe to hand-edit (see `config.example.json`).
 
 <details>
 <summary>What the CLI flow looks like</summary>
 
 ```
-Upcoming shows (via gametime):
+Upcoming shows (merged across marketplaces):
    1. Wed Sep 9 2026 7:00 PM  Weezer — Chase Center, San Francisco  from $38
 
 Watch which one? 1
   matched on vivid     Weezer — Chase Center, San Francisco
   matched on tickpick  Weezer, The Shins & Silversun Pickups — Chase Center, San Francisco
   ...
-Current zone minimums (all-in, cheapest across sites):
+Current zone minimums (all-in, cheapest across sites, before fees):
   Upper   $37
   100s    $131
   Floor   $215
@@ -132,6 +140,8 @@ Current zone minimums (all-in, cheapest across sites):
 </details>
 
 ## Run
+
+The UI starts and stops the watcher for you. To run it by hand:
 
 ```bash
 .venv/bin/python watcher.py --once    # single quiet check, no alerts
@@ -147,19 +157,16 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.YOU.ticket-watcher.p
 launchctl bootout gui/$(id -u)/com.YOU.ticket-watcher                                  # stop
 ```
 
-### Phone alerts (optional)
-
-Install the ntfy app ([iOS](https://apps.apple.com/us/app/ntfy/id1625396347) /
-[Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)),
-subscribe to a long random topic name, and export it as `NTFY_TOPIC` (or set
-it in the plist). Anyone who knows the topic can read and send to it, so
-treat it like a password.
+The watcher exits cleanly ~90 minutes after the last tracked show starts.
+One honest limitation: the watcher runs on your machine, so a sleeping
+laptop sends no alerts — keep it awake (or run it on something always-on)
+during the hours you care about.
 
 ## Tests
 
 The decision-making — parsers, alert tiers, cooldowns, momentum logic,
-config loading, cross-site event matching, state persistence — is covered
-by unit tests. No network required.
+config loading, cross-site event matching, currency handling, state
+persistence — is covered by unit tests. No network required.
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt

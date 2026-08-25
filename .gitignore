@@ -12,3 +12,7 @@ config.json
 
 # macOS
 .DS_Store
+
+# editor / workspace config
+.cursor/
+components.json
