@@ -10,11 +10,18 @@ on the other sites (by date + venue), shows the live per-zone minimums, and
 prompts for your alert thresholds.
 """
 
+from __future__ import annotations   # keeps 3.10+ type syntax parseable below
+
+import sys
+
+if sys.version_info < (3, 10):       # macOS system python3 can be 3.9
+    sys.exit(f"Doors needs Python 3.10+ (you have {sys.version.split()[0]}) "
+             f"— try: brew install python")
+
 import argparse
 import html
 import json
 import re
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta

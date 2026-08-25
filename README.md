@@ -84,6 +84,9 @@ Was all of that necessary? The first version died silently twice. Yes.
 
 ## Setup
 
+Requires macOS and Python 3.10+ (`brew install python` if your system one
+is older).
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt

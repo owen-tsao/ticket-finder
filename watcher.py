@@ -26,6 +26,14 @@ Usage:
     # production: run under launchd (see ticket-watcher.plist.example)
 """
 
+from __future__ import annotations   # keeps 3.10+ type syntax parseable below
+
+import sys
+
+if sys.version_info < (3, 10):       # macOS system python3 can be 3.9
+    sys.exit(f"Doors needs Python 3.10+ (you have {sys.version.split()[0]}) "
+             f"— try: brew install python")
+
 import argparse
 import faulthandler
 import fcntl
@@ -33,6 +41,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import threading
 import urllib.request
@@ -129,7 +138,10 @@ LOCK_FILE = HERE / ".watcher.lock"
 HEARTBEAT_FILE = HERE / ".heartbeat"
 WATCHDOG_STALL_S = 300        # force-restart if no completed cycle in 5 min
 RESTART_DETECT_S = 600        # heartbeat younger than this at boot = restart
-TERMINAL_NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
+# PATH lookup covers Intel Macs (/usr/local/bin); the literal is a fallback
+# for launchd, whose minimal PATH doesn't include Homebrew
+TERMINAL_NOTIFIER = (shutil.which("terminal-notifier")
+                     or "/opt/homebrew/bin/terminal-notifier")
 
 
 def zone_label(zone: str) -> str:

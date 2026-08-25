@@ -9,13 +9,20 @@ http.server — no build step, no extra dependencies; everything reuses
 discover.py and watcher.py directly.
 """
 
+from __future__ import annotations   # keeps 3.10+ type syntax parseable below
+
+import sys
+
+if sys.version_info < (3, 10):       # macOS system python3 can be 3.9
+    sys.exit(f"Doors needs Python 3.10+ (you have {sys.version.split()[0]}) "
+             f"— try: brew install python")
+
 import fcntl
 import json
 import os
 import re
 import signal
 import subprocess
-import sys
 import threading
 import time
 import urllib.parse
